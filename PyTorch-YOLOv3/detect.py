@@ -85,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_cpu", type=int, default=0, help="number of cpu threads to use during batch generation")
     parser.add_argument("--img_size", type=int, default=416, help="size of each image dimension")
     parser.add_argument("--checkpoint_model", type=str, help="path to checkpoint model")
+    parser.add_argument("--csv_path", type="str")
     opt = parser.parse_args()
     
     # Debug: Print all arguments
@@ -94,6 +95,7 @@ if __name__ == "__main__":
 
     opt.model_def = "config/yolov3-{}.cfg".format(opt.dataset)
     opt.class_path = "data/{}/classes.names".format(opt.dataset)
+    
 
     # Check if image folder exists and list contents
     print("\nChecking image folder:")
@@ -155,7 +157,7 @@ if __name__ == "__main__":
     img_detections = []  # Stores detections for each image index
 
     # Prepare CSV file for saving results
-    csv_file = open('output/detection_results.csv', 'w', newline='')
+    csv_file = open(f'output/{opt.csv_path}', 'w', newline='')
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(['image_name', 'class', 'confidence', 'x1', 'y1', 'x2', 'y2', 'width', 'height'])
 
