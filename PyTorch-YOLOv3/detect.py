@@ -14,13 +14,65 @@ from PIL import Image
 import glob
 
 import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets
+from torch.utils.data import DataLoader, Dataset
+from torchvision import datasets, transforms
 from torch.autograd import Variable
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.ticker import NullLocator
+
+class RGBImageFolder(Dataset):
+    def __init__(self, folder_path, img_size=416):
+        self.files = sorted(glob.glob("%s/*.[pP][nN][gG]" % folder_path) + 
+                          glob.glob("%s/*.*[jJ][pP][eE]*[gG]" % folder_path))
+        self.img_size = img_size
+        print(f"\nRGBImageFolder initialized with {len(self.files)} images")
+        for f in self.files:
+            print(f"- {f}")
+
+    def __getitem__(self, index):
+        img_path = self.files[index % len(self.files)]
+        
+        # Extract image
+        img = Image.open(img_path)
+        
+        # Convert RGBA to RGB if necessary
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            # Convert to RGB
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'RGBA':
+                background.paste(img, mask=img.split()[3])  # Use alpha channel as mask
+            elif img.mode == 'LA':
+                background.paste(img, mask=img.split()[1])  # Use alpha channel as mask
+            elif img.mode == 'P':
+                background.paste(img, mask=img.getchannel('A'))  # Use transparency as mask
+            img = background
+
+        # Resize
+        img = img.resize((self.img_size, self.img_size))
+        
+        # Convert to RGB (if not already)
+        img = img.convert('RGB')
+        
+        # Convert to numpy, transpose to channels first
+        img = np.array(img)
+        img = img.transpose((2, 0, 1))
+        img = img / 255.0
+        img = torch.from_numpy(img).float()
+
+        return img_path, img
+
+    def __len__(self):
+        return len(self.files)
+
+    def _pad_to_square(self, img):
+        h, w = img.shape[:2]
+        dim_diff = np.abs(h - w)
+        pad1, pad2 = dim_diff // 2, dim_diff - dim_diff // 2
+        pad = ((pad1, pad2), (0, 0), (0, 0)) if h <= w else ((0, 0), (pad1, pad2), (0, 0))
+        img = np.pad(img, pad, 'constant', constant_values=127.5)
+        return img
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -43,25 +95,10 @@ if __name__ == "__main__":
     opt.model_def = "config/yolov3-{}.cfg".format(opt.dataset)
     opt.class_path = "data/{}/classes.names".format(opt.dataset)
 
-    # Debug: Check if image folder exists and list contents
+    # Check if image folder exists and list contents
     print("\nChecking image folder:")
     if not os.path.exists(opt.image_folder):
         print(f"Error: Image folder '{opt.image_folder}' does not exist!")
-        sys.exit(1)
-    
-    # List all PNG and JPG files in the folder
-    image_files = glob.glob(os.path.join(opt.image_folder, "*.png")) + \
-                 glob.glob(os.path.join(opt.image_folder, "*.PNG")) + \
-                 glob.glob(os.path.join(opt.image_folder, "*.jpg")) + \
-                 glob.glob(os.path.join(opt.image_folder, "*.jpeg")) + \
-                 glob.glob(os.path.join(opt.image_folder, "*.JPEG"))
-    
-    print(f"Found {len(image_files)} image files:")
-    for img_path in image_files:
-        print(f"- {img_path}")
-
-    if len(image_files) == 0:
-        print("Error: No PNG or JPG images found in the specified folder!")
         sys.exit(1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,22 +107,6 @@ if __name__ == "__main__":
     # Create output directories
     os.makedirs("output", exist_ok=True)
     os.makedirs("output/images", exist_ok=True)
-    
-    # Debug: Check model paths
-    print("\nChecking model paths:")
-    print(f"Model config: {opt.model_def}")
-    print(f"Class names: {opt.class_path}")
-    print(f"Weights path: {opt.weights_path}")
-
-    if not os.path.exists(opt.model_def):
-        print(f"Error: Model config file '{opt.model_def}' not found!")
-        sys.exit(1)
-    if not os.path.exists(opt.class_path):
-        print(f"Error: Class names file '{opt.class_path}' not found!")
-        sys.exit(1)
-    if not os.path.exists(opt.weights_path):
-        print(f"Error: Weights file '{opt.weights_path}' not found!")
-        sys.exit(1)
 
     # Set up model
     try:
@@ -97,11 +118,9 @@ if __name__ == "__main__":
 
     try:
         if opt.weights_path.endswith(".weights"):
-            # Load darknet weights
             model.load_darknet_weights(opt.weights_path)
             print("Loaded darknet weights successfully")
         else:
-            # Load checkpoint weights
             model.load_state_dict(torch.load(opt.weights_path))
             print("Loaded checkpoint weights successfully")
     except Exception as e:
@@ -110,20 +129,10 @@ if __name__ == "__main__":
 
     model.eval()  # Set in evaluation mode
 
-    # Modified ImageFolder to explicitly handle PNG files
-    class ModifiedImageFolder(ImageFolder):
-        def __init__(self, folder_path, img_size=416):
-            super().__init__(folder_path, img_size=img_size)
-            self.files = sorted(glob.glob("%s/*.[pP][nN][gG]" % folder_path) + 
-                              glob.glob("%s/*.[jJ][pP][eE][gG]" % folder_path) + 
-                              glob.glob("%s/*.[jJ][pP][gG]" % folder_path))
-            print(f"\nModifiedImageFolder initialized with {len(self.files)} images")
-            for f in self.files:
-                print(f"- {f}")
-
+    # Initialize dataloader with our custom RGBImageFolder
     try:
         dataloader = DataLoader(
-            ModifiedImageFolder(opt.image_folder, img_size=opt.img_size),
+            RGBImageFolder(opt.image_folder, img_size=opt.img_size),
             batch_size=opt.batch_size,
             shuffle=False,
             num_workers=opt.n_cpu,
@@ -194,7 +203,19 @@ if __name__ == "__main__":
             filename = path.split("/")[-1].split(".")[0]
             
             # Create plot
-            img = np.array(Image.open(path))
+            img = Image.open(path)
+            # Convert RGBA to RGB if necessary
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'RGBA':
+                    background.paste(img, mask=img.split()[3])
+                elif img.mode == 'LA':
+                    background.paste(img, mask=img.split()[1])
+                elif img.mode == 'P':
+                    background.paste(img, mask=img.getchannel('A'))
+                img = background
+            img = img.convert('RGB')
+            img = np.array(img)
             print(f"Loaded image shape: {img.shape}")
             
             plt.figure()
